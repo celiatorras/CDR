@@ -1,4 +1,3 @@
-import queue
 import sys
 import threading
 import gi
@@ -21,13 +20,8 @@ class CourseManager(Gtk.Window):
         self.entry = None
         self.lock = threading.Lock()
         self.liststore = None
-        self.inactivity_timeout = 15  # segon
-        self.input_queue = queue.Queue()
-        
-        self.login_event = threading.Event()
-        self.login_event.set()
-        self.read_user_input()
-        
+        self.inactivity_timer = threading.Timer(15, self.logout)
+
         # Configurar la interfaz gráfica
         self.box = Gtk.VBox(spacing=6)
         self.label = Gtk.Label()
@@ -35,23 +29,23 @@ class CourseManager(Gtk.Window):
         self.box.pack_start(self.label, True, True, 0)
         self.add(self.box)
         self.show_all()
+        self.running = True
+        self.input_thread = threading.Thread(target=self.read_user_input)
+        self.input_thread.daemon = True
+        self.input_thread.start()
         
         self.create_logout_button()
         self.create_entry("Introduce lo que quieras ver:")
         self.start_inactivity_timer()
         
     def start_inactivity_timer(self):
-        self.inactivity_timer_id = GLib.timeout_add_seconds(self.inactivity_timeout, self.logout_thread)
+        self.inactivity_timer.start()
 
     def reset_inactivity_timer(self):
-        self.stop_inactivity_timer()
+        # Reseteja el temporitzador cada vegada que es rep una acció de l'usuari
+        self.inactivity_timer.cancel()
+        self.inactivity_timer = threading.Timer(15, self.logout)
         self.start_inactivity_timer()
-
-    def read_user_input(self):
-        user_input = input("Enter UID: ")
-        self.input_queue.put(user_input)
-        self.login_event.set()
-        self.login()
 
     def get(self, url):
         try:
@@ -64,16 +58,13 @@ class CourseManager(Gtk.Window):
             self.conn.close()
         
     def login(self):
-        try:
-            self.uid = self.input_queue.get(timeout=0.1)     #D1FDE202, 938B506
-            
-            data = self.get("/CriticalDesignPBE/back/index.php/students?uid={}".format(self.uid))
-            if data:
-                with self.lock:
-                    self.user = data[0]['userName']
-                    GLib.idle_add(self.update_label, "Welcome: " + self.user)
-        except queue.Empty:
-            pass
+        self.uid = input()   #D1FDE202, 938B506
+        data = self.get("/CriticalDesignPBE/back/index.php/students?uid={}".format(self.uid))
+        if data:
+            with self.lock:
+                self.user = data[0]['userName']
+                GLib.idle_add(self.update_label, "Welcome: " + self.user)
+                self.running = False
             
     def create_logout_button(self):
         self.outbutton = Gtk.Button(label = 'LOGOUT')
@@ -89,38 +80,34 @@ class CourseManager(Gtk.Window):
             self.uid = None
         if self.conn:
             self.conn.close()
-        self.stop_inactivity_timer()
-        self.read_user_input()
+        GLib.idle_add(self.login)
+        self.running = True
 
     def update_label(self, text):
         self.label.set_text(text) 
         self.show_all()
 
-    def stop_inactivity_timer(self):
-        if hasattr(self, 'inactivity_timer_id') and self.inactivity_timer_id is not None:
-            GLib.source_remove(self.inactivity_timer_id)
-            self.inactivity_timer_id = None
+    def read_user_input(self):
+        while self.running:
+            self.login()
 
     def create_entry(self, text):
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text(text)
-        
         self.entry.connect("activate", lambda entry: self.entry_activated(entry = self.entry))
         self.box.pack_start(self.entry, True, True, 0)
 
     def entry_activated(self, entry):
         self.consultaThread(entry)
-        self.reset_inactivity_timer()
-        entry.set_text("")
 
     def consultaThread(self, entry):  #creem un thread per consultar el server de forma concurrent
         text = entry.get_text()
         thread1 = threading.Thread(target= self.consultarServer, args=(text, ))  #li passem el que esta escrit i el uid
-        thread1.start()   # Reseteja el temporitzador quan es rep una acció de l'usuari
+        thread1.start()
+        self.reset_inactivity_timer()  # Reseteja el temporitzador quan es rep una acció de l'usuari
         
     def consultarServer(self, text):
         self.table = text
-        
         self.aux = self.table.split("?") #mirem primera part de la query per saber si és marks i enviar uid
         
         if (self.aux[0]=="marks" and self.uid):
@@ -157,10 +144,14 @@ class CourseManager(Gtk.Window):
 
         self.box.pack_start(self.treeview, True, True, 0)
 
-    def destroy_table(self):
+    def destroy_table(self, json_array):
         self.liststore = None
         
 
 win = CourseManager()
+css_provider = Gtk.CssProvider()
+css_provider.load_from_path("style.css")
+
+win.get_style_context().add_provider(css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 win.connect("destroy", Gtk.main_quit)
 Gtk.main()
